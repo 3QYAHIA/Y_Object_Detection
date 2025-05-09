@@ -1,2 +1,2 @@
 # Data module for object detection
-from .coco_dataset import CocoDataset, get_coco_dataloader, get_transform 
+from .coco_dataset import CocoDataset, get_coco_dataloader 

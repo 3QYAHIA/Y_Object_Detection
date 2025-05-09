@@ -616,7 +616,7 @@ if __name__ == "__main__":
     # Dataset parameters
     parser.add_argument("--data-dir", type=str, default=None,
                        help="Data directory")
-    parser.add_argument("--dataset-type", type=str, default="small",
+    parser.add_argument("--dataset-type", type=str, default="mini",
                       choices=["mini", "small", "full"],
                       help="Type of dataset to use (mini: ~300 images, small: ~5K images, full: ~120K images)")
     

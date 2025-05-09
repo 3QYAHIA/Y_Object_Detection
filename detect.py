@@ -30,9 +30,9 @@ def load_model(backbone, checkpoint_path, device):
     Returns:
         model: Loaded model
     """
-    # Create model - COCO has 91 classes (including background)
+    # Create model - COCO tiny dataset has 5 classes + background
     model = get_faster_rcnn_model(
-        num_classes=91,
+        num_classes=6,
         backbone=backbone,
         pretrained=False,
         trainable_backbone_layers=0

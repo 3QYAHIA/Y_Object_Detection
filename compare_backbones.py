@@ -152,7 +152,7 @@ def compare_models(args):
         
         # Create model
         model = get_faster_rcnn_model(
-            num_classes=91,  # COCO has 80 classes + background
+            num_classes=6,  # COCO tiny dataset has 5 classes + background
             backbone=backbone,
             pretrained=False,
             trainable_backbone_layers=0
