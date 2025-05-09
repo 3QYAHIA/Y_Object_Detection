@@ -43,20 +43,6 @@ python detect.py --backbone resnet50 --image path/to/image.jpg
 - `detect.py`: Inference script
 - `compare_backbones.py`: Backbone comparison script
 
-## Collaboration
-
-This project is open for collaboration. Please follow these guidelines:
-
-1. Create a feature branch for your changes: `git checkout -b feature/your-feature-name`
-2. Make your changes and test them
-3. Submit a pull request with a clear description of your changes
-
-## Future Improvements
-
-- Add more backbone options (MobileNetV3, EfficientNet)
-- Implement YOLOv5 and SSD models for comparison
-- Improve training speed with mixed precision
-- Add support for custom datasets
 
 ## License
 MIT 
