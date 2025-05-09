@@ -1,20 +1,109 @@
 #!/usr/bin/env python3
+# Set matplotlib backend to non-interactive to avoid tkinter threading issues
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+
 import os
 import torch
 import numpy as np
 import argparse
 import time
 import datetime
-from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 import json
+import requests
+from pathlib import Path
 
 # Import project modules
 from data.coco_dataset import get_coco_dataloader
 from models.detector import get_faster_rcnn_model, get_model_info
 from utils.visualization import save_detection_visualization
 
-def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq=10):
+def download_coco_dataset(data_dir, dataset_type="mini"):
+    """
+    Download COCO dataset
+    
+    Args:
+        data_dir: Directory to save dataset
+        dataset_type: Type of dataset to download (mini, small, full)
+            - mini: 5 classes, ~300 images (default)
+            - small: COCO val2017 - ~5K images
+            - full: COCO train2017 - ~120K images
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    coco_dir = os.path.join(data_dir, "coco")
+    os.makedirs(coco_dir, exist_ok=True)
+    
+    if dataset_type == "mini":
+        print("Using mini COCO dataset (5 classes, ~300 images)")
+        # Mini dataset is already included in the project
+        return
+    
+    elif dataset_type == "small":
+        print("Downloading COCO val2017 dataset (~5K images)...")
+        # Download val2017 images
+        val_url = "http://images.cocodataset.org/zips/val2017.zip"
+        val_zip = os.path.join(coco_dir, "val2017.zip")
+        
+        # Download annotations
+        ann_url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+        ann_zip = os.path.join(coco_dir, "annotations.zip")
+        
+        # Download files
+        if not os.path.exists(os.path.join(coco_dir, "val2017")):
+            print("Downloading val2017 images...")
+            download_file(val_url, val_zip)
+            extract_zip(val_zip, coco_dir)
+        
+        if not os.path.exists(os.path.join(coco_dir, "annotations")):
+            print("Downloading annotations...")
+            download_file(ann_url, ann_zip)
+            extract_zip(ann_zip, coco_dir)
+            
+    elif dataset_type == "full":
+        print("Downloading COCO train2017 dataset (~120K images)...")
+        # Download train2017 images
+        train_url = "http://images.cocodataset.org/zips/train2017.zip"
+        train_zip = os.path.join(coco_dir, "train2017.zip")
+        
+        # Download annotations
+        ann_url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+        ann_zip = os.path.join(coco_dir, "annotations.zip")
+        
+        # Download files
+        if not os.path.exists(os.path.join(coco_dir, "train2017")):
+            print("Downloading train2017 images...")
+            download_file(train_url, train_zip)
+            extract_zip(train_zip, coco_dir)
+        
+        if not os.path.exists(os.path.join(coco_dir, "annotations")):
+            print("Downloading annotations...")
+            download_file(ann_url, ann_zip)
+            extract_zip(ann_zip, coco_dir)
+    
+    print("Dataset download complete.")
+
+def download_file(url, local_path):
+    """Download a file from a URL to a local path"""
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    
+    with open(local_path, 'wb') as f:
+        with tqdm(total=total_size, unit='B', unit_scale=True, desc=local_path) as pbar:
+            for data in response.iter_content(chunk_size=4096):
+                f.write(data)
+                pbar.update(len(data))
+
+def extract_zip(zip_path, extract_dir):
+    """Extract a zip file"""
+    import zipfile
+    print(f"Extracting {zip_path}...")
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+    print(f"Extraction complete.")
+
+def train_one_epoch(model, optimizer, data_loader, device, epoch):
     """
     Train model for one epoch
     
@@ -24,7 +113,6 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq=10)
         data_loader: DataLoader for training data
         device: Device to train on
         epoch: Current epoch
-        print_freq: Frequency to print loss
         
     Returns:
         epoch_loss: Average loss for the epoch
@@ -77,11 +165,10 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq=10)
                 loss_rpn_box_reg += loss_value.item()
         
         # Update progress bar
-        if i % print_freq == 0:
-            pbar.set_postfix({
-                'loss': losses.item(),
-                'average': total_loss / (i + 1)
-            })
+        pbar.set_postfix({
+            'loss': losses.item(),
+            'average': total_loss / (i + 1)
+        })
     
     # Calculate average losses
     num_batches = len(data_loader)
@@ -107,48 +194,71 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq=10)
         'loss_rpn_box_reg': epoch_loss_rpn_box_reg
     }
 
-@torch.inference_mode()
 def evaluate(model, data_loader, device):
+    """Simple evaluation function to test on validation data"""
+    model.eval()
+    total_correct = 0
+    total_objects = 0
+    
+    with torch.no_grad():
+        for images, targets in tqdm(data_loader, desc="Evaluating"):
+            images = list(image.to(device) for image in images)
+            outputs = model(images)
+            
+            for i, output in enumerate(outputs):
+                # Get predictions with confidence > 0.5
+                mask = output['scores'] > 0.5
+                pred_boxes = output['boxes'][mask].cpu()
+                pred_labels = output['labels'][mask].cpu()
+                
+                # Get ground truth
+                gt_boxes = targets[i]['boxes'].to(device)
+                gt_labels = targets[i]['labels'].to(device)
+                
+                # Match predictions to ground truth
+                if len(pred_boxes) > 0 and len(gt_boxes) > 0:
+                    # Calculate IoU between predicted and ground truth boxes
+                    ious = box_iou(pred_boxes, gt_boxes)
+                    
+                    # For each prediction, find the best matching ground truth
+                    max_iou_values, max_iou_idxs = ious.max(dim=1)
+                    
+                    # Count correct predictions (IoU > 0.5 and correct class)
+                    for j, (iou, pred_idx) in enumerate(zip(max_iou_values, max_iou_idxs)):
+                        if iou > 0.5 and pred_labels[j] == gt_labels[pred_idx]:
+                            total_correct += 1
+                
+                total_objects += len(gt_boxes)
+    
+    accuracy = total_correct / max(1, total_objects)
+    print(f"Validation accuracy: {accuracy:.4f} ({total_correct}/{total_objects})")
+    return accuracy
+
+def box_iou(boxes1, boxes2):
     """
-    Evaluate model on validation data
+    Compute IoU between two sets of boxes
     
     Args:
-        model: Detection model
-        data_loader: DataLoader for validation data
-        device: Device to evaluate on
-        
+        boxes1: (N, 4) tensor of boxes [x1, y1, x2, y2]
+        boxes2: (M, 4) tensor of boxes [x1, y1, x2, y2]
+    
     Returns:
-        predictions: List of model predictions
+        iou: (N, M) tensor of IoU values
     """
-    # Set model to evaluation mode
-    model.eval()
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
     
-    # Collect predictions
-    predictions = []
+    # Compute overlap areas
+    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
+    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
     
-    # Iterate over batches
-    for images, targets in tqdm(data_loader, desc="Evaluating"):
-        # Move to device
-        images = list(image.to(device) for image in images)
-        
-        # Forward pass
-        with torch.no_grad():
-            outputs = model(images)
-        
-        # Collect predictions
-        for i, output in enumerate(outputs):
-            # Get image id
-            image_id = targets[i]['image_id']
-            
-            # Add to predictions
-            predictions.append((
-                output['boxes'],
-                output['labels'],
-                output['scores'],
-                image_id
-            ))
+    wh = (rb - lt).clamp(min=0)  # [N,M,2]
+    intersection = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
     
-    return predictions
+    union = area1[:, None] + area2 - intersection
+    
+    iou = intersection / union
+    return iou
 
 def main(args):
     # Set up output directory
@@ -166,20 +276,32 @@ def main(args):
     # Get data root
     data_root = args.data_dir if args.data_dir else os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     
-    # Set up data paths - always use tiny_subset if it exists
-    tiny_subset_dir = os.path.join(data_root, "coco", "tiny_subset")
-    if os.path.exists(tiny_subset_dir) or args.tiny:
+    # Download dataset if needed
+    download_coco_dataset(data_root, args.dataset_type)
+    
+    # Set up data paths based on dataset type
+    if args.dataset_type == "mini":
+        # Use the tiny subset
         root_dir = os.path.join(data_root, "coco", "tiny_subset", "val2017")
         ann_file = os.path.join(data_root, "coco", "tiny_subset", "annotations", "instances_val2017.json")
-        print("Using tiny subset of COCO dataset (5 classes, ~300 images)")
-    elif args.subset:
-        root_dir = os.path.join(data_root, "coco", "subset", "train2017")
-        ann_file = os.path.join(data_root, "coco", "subset", "annotations", "instances_train2017.json")
-        print("Using subset of COCO dataset (10 classes, ~1000 images)")
-    else:
+        print("Using mini COCO dataset (5 classes, ~300 images)")
+    elif args.dataset_type == "small":
+        # Use val2017
         root_dir = os.path.join(data_root, "coco", "val2017")
         ann_file = os.path.join(data_root, "coco", "annotations", "instances_val2017.json")
-        print("Using full validation set of COCO dataset")
+        print("Using COCO val2017 dataset (~5K images)")
+    elif args.dataset_type == "full":
+        # Use train2017
+        root_dir = os.path.join(data_root, "coco", "train2017")
+        ann_file = os.path.join(data_root, "coco", "annotations", "instances_train2017.json")
+        print("Using COCO train2017 dataset (~120K images)")
+    
+    # Check if dataset exists
+    if not os.path.exists(root_dir):
+        raise FileNotFoundError(f"Dataset directory {root_dir} not found. Please check your paths or use --download to download the dataset.")
+    
+    if not os.path.exists(ann_file):
+        raise FileNotFoundError(f"Annotation file {ann_file} not found. Please check your paths or use --download to download the dataset.")
     
     # Create dataloaders
     train_dataloader = get_coco_dataloader(
@@ -187,7 +309,16 @@ def main(args):
         ann_file=ann_file,
         batch_size=args.batch_size,
         train=True,
-        subset=args.subset or args.tiny
+        subset=(args.dataset_type == "mini")  # Use subset only for mini dataset
+    )
+    
+    # Create a validation dataloader with a different batch size
+    val_dataloader = get_coco_dataloader(
+        root_dir=root_dir,
+        ann_file=ann_file,
+        batch_size=args.batch_size // 2 or 1,  # Smaller batch size for validation
+        train=False,
+        subset=(args.dataset_type == "mini")  # Use subset only for mini dataset
     )
     
     # Create model
@@ -202,13 +333,9 @@ def main(args):
     # Print model info
     model_info = get_model_info(model)
     print("Model Info:")
-    print(f"  Backbone: {model_info['backbone']}")
+    print(f"  Backbone: {args.backbone}")
     print(f"  Total Parameters: {model_info['total_parameters']:,}")
     print(f"  Trainable Parameters: {model_info['trainable_parameters']:,}")
-    
-    # Save model info
-    with open(os.path.join(output_dir, "model_info.json"), "w") as f:
-        json.dump(model_info, f, indent=4)
     
     # Move model to device
     model.to(device)
@@ -229,15 +356,15 @@ def main(args):
         gamma=args.lr_gamma
     )
     
-    # Create TensorBoard writer
-    writer = SummaryWriter(log_dir=os.path.join(output_dir, "logs"))
-    
-    # Track best validation loss
-    best_loss = float('inf')
+    # Track best validation accuracy
+    best_accuracy = 0.0
     
     # Train model
     print(f"Starting training for {args.epochs} epochs")
     start_time = time.time()
+    
+    # Save training info
+    training_metrics = []
     
     for epoch in range(args.epochs):
         # Train one epoch
@@ -252,44 +379,50 @@ def main(args):
         # Update learning rate
         lr_scheduler.step()
         
-        # Save model at checkpoint frequency
-        if epoch % args.checkpoint_freq == 0 or epoch == args.epochs - 1:
-            # Save checkpoint
-            checkpoint = {
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
+        # Evaluate model
+        if epoch % args.eval_freq == 0 or epoch == args.epochs - 1:
+            accuracy = evaluate(model, val_dataloader, device)
+            
+            # Save best model
+            if accuracy > best_accuracy:
+                best_accuracy = accuracy
+                torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
+                print(f"New best model saved with accuracy: {best_accuracy:.4f}")
+                
+            # Save metrics for this epoch
+            epoch_metrics = {
                 'epoch': epoch,
-                'args': vars(args)
+                'train_loss': train_metrics['loss'],
+                'accuracy': accuracy
             }
-            torch.save(checkpoint, os.path.join(output_dir, f"checkpoint_{epoch:03d}.pth"))
+            training_metrics.append(epoch_metrics)
         
-        # Save best model
-        if train_metrics['loss'] < best_loss:
-            best_loss = train_metrics['loss']
-            torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
+        # Save checkpoint
+        if epoch % args.checkpoint_freq == 0 or epoch == args.epochs - 1:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+                'accuracy': best_accuracy
+            }, os.path.join(output_dir, f"checkpoint_{epoch:03d}.pth"))
         
-        # Log metrics to TensorBoard
-        for k, v in train_metrics.items():
-            writer.add_scalar(f"train/{k}", v, epoch)
-        
-        # Log learning rate
-        writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], epoch)
-        
-        # Run inference on a few training samples
-        if epoch % args.visualization_freq == 0 or epoch == args.epochs - 1:
+        # Create visualizations
+        if epoch % args.vis_freq == 0 or epoch == args.epochs - 1:
             # Get a batch of data
-            batch_imgs, batch_targets = next(iter(train_dataloader))
+            imgs, targets = next(iter(val_dataloader))
             
             # Save visualizations
             vis_dir = os.path.join(output_dir, "visualizations", f"epoch_{epoch:03d}")
+            os.makedirs(vis_dir, exist_ok=True)
+            
             save_detection_visualization(
                 model=model,
-                dataset=train_dataloader.dataset,
-                images=batch_imgs,
-                targets=batch_targets,
+                dataset=val_dataloader.dataset,
+                images=imgs,
+                targets=targets,
                 output_dir=vis_dir,
-                num_samples=args.num_vis_samples
+                num_samples=min(len(imgs), 5)
             )
     
     # Calculate training time
@@ -300,8 +433,12 @@ def main(args):
     # Save final model
     torch.save(model.state_dict(), os.path.join(output_dir, "final_model.pth"))
     
-    # Close TensorBoard writer
-    writer.close()
+    # Save training metrics to JSON
+    with open(os.path.join(output_dir, 'training_metrics.json'), 'w') as f:
+        json.dump(training_metrics, f, indent=2)
+    
+    print(f"Training complete. Best validation accuracy: {best_accuracy:.4f}")
+    print(f"Model saved to {os.path.join(output_dir, 'best_model.pth')}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train object detection model")
@@ -312,6 +449,13 @@ if __name__ == "__main__":
                         help="Backbone architecture for the model")
     parser.add_argument("--trainable-layers", type=int, default=3,
                        help="Number of trainable layers in backbone")
+    
+    # Dataset parameters
+    parser.add_argument("--data-dir", type=str, default=None,
+                       help="Data directory")
+    parser.add_argument("--dataset-type", type=str, default="small",
+                      choices=["mini", "small", "full"],
+                      help="Type of dataset to use (mini: ~300 images, small: ~5K images, full: ~120K images)")
     
     # Training parameters
     parser.add_argument("--batch-size", type=int, default=4,
@@ -327,21 +471,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
     
-    # Data parameters
-    parser.add_argument("--data-dir", type=str, default=None,
-                       help="Data directory")
-    parser.add_argument("--subset", action="store_true",
-                       help="Use subset of COCO dataset (10 classes)")
-    parser.add_argument("--tiny", action="store_true", default=True,
-                       help="Use tiny subset of COCO dataset (5 classes, <300MB)")
-    
     # Output parameters
     parser.add_argument("--checkpoint-freq", type=int, default=5,
                        help="Epochs between saving checkpoints")
-    parser.add_argument("--visualization-freq", type=int, default=5,
-                       help="Epochs between creating visualizations")
-    parser.add_argument("--num-vis-samples", type=int, default=5,
-                       help="Number of samples to visualize")
+    parser.add_argument("--eval-freq", type=int, default=1,
+                       help="Epochs between evaluations")
+    parser.add_argument("--vis-freq", type=int, default=5,
+                       help="Epochs between visualizations")
     
     # Hardware parameters
     parser.add_argument("--device", type=str, default="cuda",

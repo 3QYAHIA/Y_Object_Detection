@@ -1,3 +1,6 @@
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -8,6 +11,64 @@ import random
 import time
 import os
 from torchvision.utils import draw_bounding_boxes, draw_segmentation_masks
+
+def draw_boxes_on_image(image, boxes, labels, scores, color_map=None):
+    """
+    Draw bounding boxes directly on an image
+    
+    Args:
+        image: Numpy array representing the image (H, W, C) in RGB format
+        boxes: Numpy array of boxes in (x1, y1, x2, y2) format
+        labels: List of string labels for each box
+        scores: List of confidence scores for each box
+        color_map: Optional dictionary mapping labels to colors
+    
+    Returns:
+        image: Image with boxes drawn on it
+    """
+    # Make a copy of the image to avoid modifying the original
+    result_img = image.copy()
+    
+    # Generate colors for labels if not provided
+    if color_map is None:
+        color_map = {}
+        
+    # Draw each box on the image
+    for i, (box, label, score) in enumerate(zip(boxes, labels, scores)):
+        # Extract coordinates
+        x1, y1, x2, y2 = [int(coord) for coord in box]
+        
+        # Get color for this label
+        if label not in color_map:
+            # Generate a random color
+            color = (
+                random.randint(0, 255),
+                random.randint(0, 255),
+                random.randint(0, 255)
+            )
+            color_map[label] = color
+        else:
+            color = color_map[label]
+        
+        # Draw rectangle
+        cv2.rectangle(result_img, (x1, y1), (x2, y2), color, 2)
+        
+        # Prepare label text
+        label_text = f"{label}: {score:.2f}"
+        
+        # Get text size
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 1
+        (text_width, text_height), baseline = cv2.getTextSize(label_text, font, font_scale, font_thickness)
+        
+        # Draw label background
+        cv2.rectangle(result_img, (x1, y1 - text_height - 5), (x1 + text_width, y1), color, -1)
+        
+        # Draw label text
+        cv2.putText(result_img, label_text, (x1, y1 - 5), font, font_scale, (0, 0, 0), font_thickness)
+    
+    return result_img
 
 def plot_image_with_boxes(img, boxes, labels=None, scores=None, class_names=None, figsize=(12, 12)):
     """

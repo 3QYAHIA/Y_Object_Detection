@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Set matplotlib backend to non-interactive to avoid tkinter threading issues
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+
 import os
 import torch
 import numpy as np
@@ -8,450 +12,315 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
-import subprocess
 import time
+import subprocess
 
 # Import project modules
+from data.coco_dataset import get_coco_dataloader
 from models.detector import get_faster_rcnn_model, get_model_info
-from evaluation.metrics import calculate_iou_matrix
 
-def get_model_stats(backbone):
+def evaluate_speed(model, device, input_size=(800, 800), num_iterations=50):
     """
-    Get model statistics (parameters, memory usage, etc.)
+    Evaluate model inference speed
     
     Args:
-        backbone: Name of backbone (resnet50 or mobilenet_v2)
+        model: Model to evaluate
+        device: Device to run on
+        input_size: Input image size (height, width)
+        num_iterations: Number of iterations to run
         
     Returns:
-        stats: Dictionary of model statistics
+        fps: Frames per second
+        latency: Latency in milliseconds
     """
-    # Create model with smaller number of classes for tiny subset
-    model = get_faster_rcnn_model(
-        num_classes=6,  # 5 classes + background for tiny subset
-        backbone=backbone,
-        pretrained=True
-    )
+    # Set model to evaluation mode
+    model.eval()
     
-    # Get model info
-    model_info = get_model_info(model)
+    # Create dummy input tensor (Faster R-CNN expects a list of tensors)
+    dummy_input = [torch.randn(3, input_size[0], input_size[1]).to(device)]
     
-    # Get additional metrics
-    stats = {
-        'backbone': backbone,
-        'total_parameters': model_info['total_parameters'],
-        'trainable_parameters': model_info['trainable_parameters'],
-    }
+    # Warm-up
+    with torch.no_grad():
+        for _ in range(10):
+            _ = model(dummy_input)
     
-    return stats
+    # Synchronize before timing
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    
+    # Measure time
+    start_time = time.time()
+    
+    with torch.no_grad():
+        for _ in range(num_iterations):
+            _ = model(dummy_input)
+    
+    # Synchronize after timing
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    
+    end_time = time.time()
+    
+    # Calculate metrics
+    elapsed_time = end_time - start_time
+    fps = num_iterations / elapsed_time
+    latency = (elapsed_time / num_iterations) * 1000  # convert to ms
+    
+    return fps, latency
 
-def load_metrics(backbone, metric_type):
+def load_model_metrics(backbone):
     """
-    Load metrics from output directory
+    Load evaluation metrics for a model
     
     Args:
-        backbone: Name of backbone (resnet50 or mobilenet_v2)
-        metric_type: Type of metric to load (mAP, precision_recall_f1, speed)
+        backbone: Backbone name
         
     Returns:
         metrics: Dictionary of metrics
     """
-    # Define file paths
-    if metric_type == 'mAP':
-        file_path = os.path.join("outputs", backbone, "evaluation", "mAP_results.json")
-    elif metric_type == 'precision_recall_f1':
-        file_path = os.path.join("outputs", backbone, "evaluation", "precision_recall_f1.csv")
-    elif metric_type == 'speed':
-        file_path = os.path.join("outputs", backbone, "evaluation", "speed_metrics.json")
-    else:
-        raise ValueError(f"Unknown metric type: {metric_type}")
+    # Build path to metrics files
+    output_dir = os.path.join("outputs", backbone, "evaluation")
     
-    # Load metrics
-    if metric_type == 'precision_recall_f1':
-        # Load CSV file
-        df = pd.read_csv(file_path)
-        return df
-    else:
-        # Load JSON file
-        with open(file_path, 'r') as f:
-            metrics = json.load(f)
-        return metrics
+    # Initialize metrics
+    metrics = {
+        "backbone": backbone,
+        "mAP": 0,
+        "mAP_0.5": 0,
+        "mAP_0.75": 0,
+        "precision": 0,
+        "recall": 0,
+        "f1_score": 0
+    }
+    
+    # Load mAP results
+    map_file = os.path.join(output_dir, "map_results.json")
+    if os.path.exists(map_file):
+        try:
+            with open(map_file, "r") as f:
+                map_results = json.load(f)
+                metrics["mAP"] = map_results.get("mAP", 0)
+                metrics["mAP_0.5"] = map_results.get("mAP_0.5", 0)
+                metrics["mAP_0.75"] = map_results.get("mAP_0.75", 0)
+        except Exception as e:
+            print(f"Error loading mAP results for {backbone}: {e}")
+    
+    # Load precision, recall, F1 results
+    pr_file = os.path.join(output_dir, "precision_recall_f1.csv")
+    if os.path.exists(pr_file):
+        try:
+            df = pd.read_csv(pr_file)
+            if not df.empty:
+                # Calculate weighted average by support
+                weighted_precision = (df["precision"] * df["support"]).sum() / df["support"].sum()
+                weighted_recall = (df["recall"] * df["support"]).sum() / df["support"].sum()
+                weighted_f1 = (df["f1_score"] * df["support"]).sum() / df["support"].sum()
+                
+                metrics["precision"] = weighted_precision
+                metrics["recall"] = weighted_recall
+                metrics["f1_score"] = weighted_f1
+        except Exception as e:
+            print(f"Error loading precision-recall results for {backbone}: {e}")
+    
+    return metrics
 
-def compare_model_stats():
+def compare_models(args):
     """
-    Compare model statistics (parameters, memory usage, etc.)
-    
-    Returns:
-        df: DataFrame with model statistics
-    """
-    # Get model stats
-    resnet_stats = get_model_stats('resnet50')
-    mobilenet_stats = get_model_stats('mobilenet_v2')
-    
-    # Create DataFrame
-    stats = [resnet_stats, mobilenet_stats]
-    df = pd.DataFrame(stats)
-    
-    return df
-
-def plot_model_stats(df, output_dir):
-    """
-    Plot model statistics
+    Compare models with different backbones
     
     Args:
-        df: DataFrame with model statistics
-        output_dir: Directory to save plot
+        args: Command line arguments
     """
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Parameters plot
-    plt.figure(figsize=(10, 6))
-    sns.barplot(x='backbone', y='total_parameters', data=df)
-    plt.title('Total Parameters by Backbone')
-    plt.ylabel('Number of Parameters')
-    plt.yscale('log')
-    for i, row in enumerate(df.itertuples()):
-        plt.text(i, row.total_parameters, f"{row.total_parameters:,}", 
-                 ha='center', va='bottom')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'total_parameters.png'))
-    plt.close()
-    
-    # Trainable parameters plot
-    plt.figure(figsize=(10, 6))
-    sns.barplot(x='backbone', y='trainable_parameters', data=df)
-    plt.title('Trainable Parameters by Backbone')
-    plt.ylabel('Number of Parameters')
-    plt.yscale('log')
-    for i, row in enumerate(df.itertuples()):
-        plt.text(i, row.trainable_parameters, f"{row.trainable_parameters:,}", 
-                 ha='center', va='bottom')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'trainable_parameters.png'))
-    plt.close()
-
-def compare_speed_metrics():
-    """
-    Compare speed metrics (FPS, latency)
-    
-    Returns:
-        df: DataFrame with speed metrics
-    """
-    # Load speed metrics
-    resnet_speed = load_metrics('resnet50', 'speed')
-    mobilenet_speed = load_metrics('mobilenet_v2', 'speed')
-    
-    # Create DataFrame
-    speeds = [
-        {'backbone': 'resnet50', 'fps': resnet_speed['fps'], 'latency': resnet_speed['latency']},
-        {'backbone': 'mobilenet_v2', 'fps': mobilenet_speed['fps'], 'latency': mobilenet_speed['latency']}
-    ]
-    df = pd.DataFrame(speeds)
-    
-    return df
-
-def plot_speed_metrics(df, output_dir):
-    """
-    Plot speed metrics
-    
-    Args:
-        df: DataFrame with speed metrics
-        output_dir: Directory to save plot
-    """
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # FPS plot
-    plt.figure(figsize=(10, 6))
-    sns.barplot(x='backbone', y='fps', data=df)
-    plt.title('Frames Per Second by Backbone')
-    plt.ylabel('FPS')
-    for i, row in enumerate(df.itertuples()):
-        plt.text(i, row.fps, f"{row.fps:.2f}", ha='center', va='bottom')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'fps.png'))
-    plt.close()
-    
-    # Latency plot
-    plt.figure(figsize=(10, 6))
-    sns.barplot(x='backbone', y='latency', data=df)
-    plt.title('Inference Latency by Backbone')
-    plt.ylabel('Latency (ms)')
-    for i, row in enumerate(df.itertuples()):
-        plt.text(i, row.latency, f"{row.latency:.2f}", ha='center', va='bottom')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'latency.png'))
-    plt.close()
-
-def compare_map_metrics():
-    """
-    Compare mAP metrics
-    
-    Returns:
-        df: DataFrame with mAP metrics
-    """
-    # Load mAP metrics
-    resnet_map = load_metrics('resnet50', 'mAP')
-    mobilenet_map = load_metrics('mobilenet_v2', 'mAP')
-    
-    # Create DataFrames
-    resnet_df = pd.DataFrame({'backbone': 'resnet50', 'metric': list(resnet_map.keys()), 'value': list(resnet_map.values())})
-    mobilenet_df = pd.DataFrame({'backbone': 'mobilenet_v2', 'metric': list(mobilenet_map.keys()), 'value': list(mobilenet_map.values())})
-    
-    # Combine DataFrames
-    df = pd.concat([resnet_df, mobilenet_df])
-    
-    # Filter metrics
-    metrics_to_plot = ['mAP', 'mAP_0.5', 'mAP_0.75']
-    df = df[df['metric'].isin(metrics_to_plot)]
-    
-    return df
-
-def plot_map_metrics(df, output_dir):
-    """
-    Plot mAP metrics
-    
-    Args:
-        df: DataFrame with mAP metrics
-        output_dir: Directory to save plot
-    """
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # mAP plot
-    plt.figure(figsize=(12, 6))
-    sns.barplot(x='metric', y='value', hue='backbone', data=df)
-    plt.title('Mean Average Precision by Backbone')
-    plt.ylabel('mAP')
-    plt.xlabel('Metric')
-    
-    # Add text labels
-    for i, row in enumerate(df.itertuples()):
-        plt.text(i % 3 - 0.2 if row.backbone == 'resnet50' else i % 3 + 0.2, 
-                 row.value, f"{row.value:.3f}", ha='center', va='bottom')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'map_metrics.png'))
-    plt.close()
-
-def compare_precision_recall_f1():
-    """
-    Compare precision, recall, F1 metrics
-    
-    Returns:
-        resnet_df: DataFrame with ResNet metrics
-        mobilenet_df: DataFrame with MobileNet metrics
-    """
-    # Load metrics
-    resnet_df = load_metrics('resnet50', 'precision_recall_f1')
-    mobilenet_df = load_metrics('mobilenet_v2', 'precision_recall_f1')
-    
-    # Add backbone column
-    resnet_df['backbone'] = 'resnet50'
-    mobilenet_df['backbone'] = 'mobilenet_v2'
-    
-    return resnet_df, mobilenet_df
-
-def plot_precision_recall_f1(resnet_df, mobilenet_df, output_dir):
-    """
-    Plot precision, recall, F1 metrics
-    
-    Args:
-        resnet_df: DataFrame with ResNet metrics
-        mobilenet_df: DataFrame with MobileNet metrics
-        output_dir: Directory to save plot
-    """
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Reshape DataFrames for plotting
-    metrics = ['precision', 'recall', 'f1_score']
-    
-    # ResNet reshape
-    resnet_data = []
-    for i, row in resnet_df.iterrows():
-        for metric in metrics:
-            resnet_data.append({
-                'backbone': 'resnet50',
-                'category': row['category'],
-                'metric': metric,
-                'value': row[metric]
-            })
-    resnet_plot_df = pd.DataFrame(resnet_data)
-    
-    # MobileNet reshape
-    mobilenet_data = []
-    for i, row in mobilenet_df.iterrows():
-        for metric in metrics:
-            mobilenet_data.append({
-                'backbone': 'mobilenet_v2',
-                'category': row['category'],
-                'metric': metric,
-                'value': row[metric]
-            })
-    mobilenet_plot_df = pd.DataFrame(mobilenet_data)
-    
-    # Combine DataFrames
-    plot_df = pd.concat([resnet_plot_df, mobilenet_plot_df])
-    
-    # Get unique categories
-    categories = plot_df['category'].unique()
-    
-    # Plot per category
-    for category in categories:
-        cat_df = plot_df[plot_df['category'] == category]
-        
-        plt.figure(figsize=(10, 6))
-        sns.barplot(x='metric', y='value', hue='backbone', data=cat_df)
-        plt.title(f'Metrics for {category}')
-        plt.ylabel('Value')
-        plt.ylim(0, 1)
-        
-        # Add text labels
-        for i, row in enumerate(cat_df.itertuples()):
-            plt.text(i % 3 - 0.2 if row.backbone == 'resnet50' else i % 3 + 0.2, 
-                     row.value, f"{row.value:.3f}", ha='center', va='bottom')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'metrics_{category}.png'))
-        plt.close()
-    
-    # Plot average metrics
-    avg_df = plot_df.groupby(['backbone', 'metric'])['value'].mean().reset_index()
-    
-    plt.figure(figsize=(10, 6))
-    sns.barplot(x='metric', y='value', hue='backbone', data=avg_df)
-    plt.title('Average Metrics by Backbone')
-    plt.ylabel('Value')
-    plt.ylim(0, 1)
-    
-    # Add text labels
-    for i, row in enumerate(avg_df.itertuples()):
-        plt.text(i % 3 - 0.2 if row.backbone == 'resnet50' else i % 3 + 0.2, 
-                 row.value, f"{row.value:.3f}", ha='center', va='bottom')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'avg_metrics.png'))
-    plt.close()
-
-def create_comparison_table():
-    """
-    Create comparison table
-    
-    Returns:
-        df: DataFrame with comparison metrics
-    """
-    # Get model stats
-    model_stats = compare_model_stats()
-    
-    # Get speed metrics
-    speed_metrics = compare_speed_metrics()
-    
-    # Get mAP metrics
-    map_metrics = compare_map_metrics()
-    
-    # Create results dictionary
-    results = {}
-    
-    for backbone in ['resnet50', 'mobilenet_v2']:
-        backbone_results = {
-            'backbone': backbone,
-            'total_parameters': model_stats[model_stats['backbone'] == backbone]['total_parameters'].values[0],
-            'trainable_parameters': model_stats[model_stats['backbone'] == backbone]['trainable_parameters'].values[0],
-            'fps': speed_metrics[speed_metrics['backbone'] == backbone]['fps'].values[0],
-            'latency': speed_metrics[speed_metrics['backbone'] == backbone]['latency'].values[0],
-        }
-        
-        # Add mAP metrics
-        for metric in ['mAP', 'mAP_0.5', 'mAP_0.75']:
-            value = map_metrics[(map_metrics['backbone'] == backbone) & (map_metrics['metric'] == metric)]['value'].values[0]
-            backbone_results[metric] = value
-        
-        results[backbone] = backbone_results
-    
-    # Create DataFrame
-    df = pd.DataFrame.from_dict(results, orient='index')
-    df.reset_index(drop=True, inplace=True)
-    
-    return df
-
-def main(args):
     # Set random seed for reproducibility
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
-    # Set up output directory
+    # Create output directory
     output_dir = os.path.join("outputs", "comparison")
     os.makedirs(output_dir, exist_ok=True)
     
-    # Check if both backbones have been evaluated
-    for backbone in ['resnet50', 'mobilenet_v2']:
+    # Set device
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Get models information
+    backbones = ['resnet50', 'mobilenet_v2']
+    backbone_info = {}
+    model_metrics = []
+    
+    for backbone in backbones:
+        print(f"\nComparing backbone: {backbone}")
+        
+        # Create model
+        model = get_faster_rcnn_model(
+            num_classes=91,  # COCO has 80 classes + background
+            backbone=backbone,
+            pretrained=False,
+            trainable_backbone_layers=0
+        )
+        
+        # Get model info
+        model_info = get_model_info(model)
+        backbone_info[backbone] = model_info
+        
+        print(f"Model info:")
+        print(f"  Total parameters: {model_info['total_parameters']:,}")
+        print(f"  Trainable parameters: {model_info['trainable_parameters']:,}")
+        
+        # Move model to device
+        model.to(device)
+        
+        # Measure inference speed
+        print("Measuring inference speed...")
+        fps, latency = evaluate_speed(model, device)
+        print(f"  FPS: {fps:.2f}")
+        print(f"  Latency: {latency:.2f} ms")
+        
+        # Check if trained model exists, otherwise we'll just compare architectures
+        model_path = os.path.join("outputs", backbone, "best_model.pth")
+        if os.path.exists(model_path):
+            print(f"Loading trained model from {model_path}")
+            model.load_state_dict(torch.load(model_path, map_location=device))
+        else:
+            print(f"No trained model found for {backbone}. Skipping accuracy comparison.")
+        
+        # Run evaluation if model exists and evaluation metrics file doesn't exist
         eval_dir = os.path.join("outputs", backbone, "evaluation")
-        if not os.path.exists(eval_dir):
-            # If evaluation directory doesn't exist, run evaluation
-            print(f"Evaluation for {backbone} not found. Running evaluation...")
-            cmd = [
-                "python", "evaluate.py",
-                "--backbone", backbone,
-                "--batch-size", str(args.batch_size),
-                "--num-test-images", str(args.num_test_images),
-                "--conf-threshold", str(args.conf_threshold),
-                "--device", args.device
-            ]
-            if args.tiny:
-                cmd.append("--tiny")
-            
-            subprocess.run(cmd)
+        map_file = os.path.join(eval_dir, "map_results.json")
+        
+        if os.path.exists(model_path) and not os.path.exists(map_file):
+            print(f"Running evaluation for {backbone}...")
+            cmd = f"python evaluate.py --backbone {backbone} --device {args.device}"
+            subprocess.run(cmd, shell=True)
+        
+        # Load evaluation metrics
+        metrics = load_model_metrics(backbone)
+        
+        # Add speed metrics
+        metrics["fps"] = fps
+        metrics["latency"] = latency
+        metrics["parameters"] = model_info["total_parameters"]
+        
+        # Add to metrics list
+        model_metrics.append(metrics)
     
-    print("Comparing model statistics...")
-    model_stats = compare_model_stats()
-    plot_model_stats(model_stats, output_dir)
+    # Create comparison DataFrame
+    comparison_df = pd.DataFrame(model_metrics)
     
-    print("Comparing speed metrics...")
-    speed_metrics = compare_speed_metrics()
-    plot_speed_metrics(speed_metrics, output_dir)
+    # Save comparison to CSV
+    comparison_df.to_csv(os.path.join(output_dir, "backbone_comparison.csv"), index=False)
     
-    print("Comparing mAP metrics...")
-    map_metrics = compare_map_metrics()
-    plot_map_metrics(map_metrics, output_dir)
+    # Generate comparison plots
+    generate_comparison_plots(comparison_df, output_dir)
     
-    print("Comparing precision, recall, F1 metrics...")
-    resnet_pr_f1, mobilenet_pr_f1 = compare_precision_recall_f1()
-    plot_precision_recall_f1(resnet_pr_f1, mobilenet_pr_f1, output_dir)
-    
-    print("Creating comparison table...")
-    comparison_table = create_comparison_table()
-    comparison_table.to_csv(os.path.join(output_dir, "comparison_table.csv"), index=False)
-    
-    # Print summary
-    print("\nComparison Summary:")
-    print(comparison_table.to_string(index=False))
-    
-    print("\nComparison complete. Results saved to:", output_dir)
+    # Print comparison table
+    print("\nBackbone Comparison:")
+    print(comparison_df.to_string(index=False))
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Compare object detection backbones")
+def generate_comparison_plots(df, output_dir):
+    """
+    Generate comparison plots
     
-    # Evaluation parameters
-    parser.add_argument("--batch-size", type=int, default=4,
-                       help="Batch size for evaluation")
-    parser.add_argument("--num-test-images", type=int, default=100,
-                       help="Number of test images to evaluate")
-    parser.add_argument("--conf-threshold", type=float, default=0.5,
-                       help="Confidence threshold for detections")
+    Args:
+        df: DataFrame with comparison metrics
+        output_dir: Output directory
+    """
+    # Set style
+    sns.set(style="whitegrid")
+    
+    # Plot speed comparison
+    plt.figure(figsize=(12, 6))
+    ax = plt.subplot(121)
+    sns.barplot(x="backbone", y="fps", data=df, ax=ax)
+    plt.title("Inference Speed (FPS)")
+    plt.ylabel("Frames Per Second")
+    
+    ax = plt.subplot(122)
+    sns.barplot(x="backbone", y="latency", data=df, ax=ax)
+    plt.title("Inference Latency")
+    plt.ylabel("Latency (ms)")
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "speed_comparison.png"))
+    plt.close()
+    
+    # Plot accuracy metrics
+    plt.figure(figsize=(12, 6))
+    
+    # mAP comparison
+    ax = plt.subplot(121)
+    metrics = ["mAP_0.5", "mAP_0.75", "mAP"]
+    for i, backbone in enumerate(df["backbone"]):
+        values = [df[df["backbone"] == backbone][metric].values[0] for metric in metrics]
+        ax.bar(np.arange(len(metrics)) + 0.2*i, values, width=0.2, label=backbone)
+    
+    ax.set_xticks(np.arange(len(metrics)) + 0.1)
+    ax.set_xticklabels(["mAP@0.5", "mAP@0.75", "mAP"])
+    plt.title("mAP Comparison")
+    plt.ylabel("Score")
+    plt.ylim(0, 1)
+    plt.legend()
+    
+    # Precision, recall, F1 comparison
+    ax = plt.subplot(122)
+    metrics = ["precision", "recall", "f1_score"]
+    for i, backbone in enumerate(df["backbone"]):
+        values = [df[df["backbone"] == backbone][metric].values[0] for metric in metrics]
+        ax.bar(np.arange(len(metrics)) + 0.2*i, values, width=0.2, label=backbone)
+    
+    ax.set_xticks(np.arange(len(metrics)) + 0.1)
+    ax.set_xticklabels(["Precision", "Recall", "F1-score"])
+    plt.title("Classification Metrics")
+    plt.ylabel("Score")
+    plt.ylim(0, 1)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "accuracy_comparison.png"))
+    plt.close()
+    
+    # Size vs Performance plot
+    plt.figure(figsize=(10, 6))
+    
+    # Create bubble chart of parameters vs mAP with FPS as size
+    sizes = df["fps"] * 20  # Scale for visualization
+    
+    for i, row in df.iterrows():
+        plt.scatter(
+            row["parameters"] / 1e6,  # Parameters in millions
+            row["mAP"],
+            s=sizes[i],
+            alpha=0.7,
+            label=row["backbone"]
+        )
+        plt.text(
+            row["parameters"] / 1e6,
+            row["mAP"],
+            f"{row['backbone']}\n{row['fps']:.1f} FPS",
+            ha='center',
+            va='center'
+        )
+    
+    plt.title("Model Size vs. Accuracy vs. Speed")
+    plt.xlabel("Parameters (millions)")
+    plt.ylabel("mAP")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "size_vs_performance.png"))
+    plt.close()
+
+def main():
+    parser = argparse.ArgumentParser(description="Compare object detection models with different backbones")
+    
+    # Comparison parameters
+    parser.add_argument("--device", type=str, default="cuda",
+                       help="Device to use for evaluation (cuda or cpu)")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
     
-    # Data parameters
-    parser.add_argument("--subset", action="store_true",
-                       help="Use subset of COCO dataset (10 classes)")
-    parser.add_argument("--tiny", action="store_true", default=True,
-                       help="Use tiny subset of COCO dataset (5 classes, <300MB)")
-    
-    # Hardware parameters
-    parser.add_argument("--device", type=str, default="cuda",
-                       help="Device to use for evaluation (cuda or cpu)")
-    
     args = parser.parse_args()
     
-    main(args) 
+    # Run comparison
+    compare_models(args)
+
+if __name__ == "__main__":
+    main() 
