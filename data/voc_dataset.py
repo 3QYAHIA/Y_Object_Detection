@@ -46,6 +46,8 @@ class VOCDataset(VOCDetection):
         # Create a mapping from class names to indices (starting from 1, as 0 is background)
         self.class_to_idx = {cls_name: i + 1 for i, cls_name in enumerate(VOC_CLASSES)}
         
+        # Create a mapping from category ids to continuous indices
+        self.cat_ids_to_continuous = {i + 1: i for i in range(len(VOC_CLASSES))}
     def __getitem__(self, index):
         """
         Get image and annotations
@@ -203,4 +205,4 @@ def get_voc_dataloader(root_dir, year="2012", image_set="train", batch_size=4, n
         collate_fn=collate_fn
     )
     
-    return dataloader 
+    return dataloader
