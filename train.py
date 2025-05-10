@@ -16,74 +16,23 @@ import requests
 from pathlib import Path
 
 # Import project modules
-from data.coco_dataset import get_coco_dataloader
 from data.voc_dataset import get_voc_dataloader, download_voc_dataset
 from models.detector import get_faster_rcnn_model, get_model_info
 from utils.visualization import save_detection_visualization
 
-def download_coco_dataset(data_dir, dataset_type="mini"):
+def extract_zip(zip_path, extract_dir):
     """
-    Download COCO dataset
+    Extract a zip file
     
     Args:
-        data_dir: Directory to save dataset
-        dataset_type: Type of dataset to download (mini, small, full)
-            - mini: 5 classes, ~300 images (default)
-            - small: COCO val2017 - ~5K images
-            - full: COCO train2017 - ~120K images
+        zip_path: Path to zip file
+        extract_dir: Directory to extract to
     """
-    os.makedirs(data_dir, exist_ok=True)
-    coco_dir = os.path.join(data_dir, "coco")
-    os.makedirs(coco_dir, exist_ok=True)
-    
-    if dataset_type == "mini":
-        print("Using mini COCO dataset (5 classes, ~300 images)")
-        # Mini dataset is already included in the project
-        return
-    
-    elif dataset_type == "small":
-        print("Downloading COCO val2017 dataset (~5K images)...")
-        # Download val2017 images
-        val_url = "http://images.cocodataset.org/zips/val2017.zip"
-        val_zip = os.path.join(coco_dir, "val2017.zip")
-        
-        # Download annotations
-        ann_url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
-        ann_zip = os.path.join(coco_dir, "annotations.zip")
-        
-        # Download files
-        if not os.path.exists(os.path.join(coco_dir, "val2017")):
-            print("Downloading val2017 images...")
-            download_file(val_url, val_zip)
-            extract_zip(val_zip, coco_dir)
-        
-        if not os.path.exists(os.path.join(coco_dir, "annotations")):
-            print("Downloading annotations...")
-            download_file(ann_url, ann_zip)
-            extract_zip(ann_zip, coco_dir)
-            
-    elif dataset_type == "full":
-        print("Downloading COCO train2017 dataset (~120K images)...")
-        # Download train2017 images
-        train_url = "http://images.cocodataset.org/zips/train2017.zip"
-        train_zip = os.path.join(coco_dir, "train2017.zip")
-        
-        # Download annotations
-        ann_url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
-        ann_zip = os.path.join(coco_dir, "annotations.zip")
-        
-        # Download files
-        if not os.path.exists(os.path.join(coco_dir, "train2017")):
-            print("Downloading train2017 images...")
-            download_file(train_url, train_zip)
-            extract_zip(train_zip, coco_dir)
-        
-        if not os.path.exists(os.path.join(coco_dir, "annotations")):
-            print("Downloading annotations...")
-            download_file(ann_url, ann_zip)
-            extract_zip(ann_zip, coco_dir)
-    
-    print("Dataset download complete.")
+    import zipfile
+    print(f"Extracting {zip_path}...")
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+    print(f"Extraction complete.")
 
 def download_file(url, local_path):
     """
@@ -101,20 +50,6 @@ def download_file(url, local_path):
             for data in response.iter_content(chunk_size=4096):
                 f.write(data)
                 pbar.update(len(data))
-
-def extract_zip(zip_path, extract_dir):
-    """
-    Extract a zip file
-    
-    Args:
-        zip_path: Path to zip file
-        extract_dir: Directory to extract to
-    """
-    import zipfile
-    print(f"Extracting {zip_path}...")
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-    print(f"Extraction complete.")
 
 def train_one_epoch(model, optimizer, data_loader, device, epoch):
     """
@@ -305,82 +240,30 @@ def main(args):
     # Get data root
     data_root = args.data_dir if args.data_dir else os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     
-    # Set up dataloaders based on dataset type
-    if args.dataset == "voc":
-        # Download Pascal VOC dataset if needed
-        if args.download:
-            download_voc_dataset(data_root, args.voc_year)
-        
-        # Create dataloaders for Pascal VOC
-        train_dataloader = get_voc_dataloader(
-            root_dir=data_root,
-            year=args.voc_year,
-            image_set=args.voc_train_set,
-            batch_size=args.batch_size,
-            download=args.download
-        )
-        
-        val_dataloader = get_voc_dataloader(
-            root_dir=data_root,
-            year=args.voc_year,
-            image_set=args.voc_val_set,
-            batch_size=args.batch_size // 2 or 1,  # Smaller batch size for validation
-            download=False  # Already downloaded if needed
-        )
-        
-        # Get number of classes
-        num_classes = len(train_dataloader.dataset.categories) + 1  # +1 for background
-        print(f"Using Pascal VOC {args.voc_year} dataset with {num_classes-1} classes")
-        
-    else:  # Default to COCO dataset
-        # Download COCO dataset if needed
-        if args.download:
-            download_coco_dataset(data_root, args.dataset_type)
-        
-        # Set up data paths based on dataset type
-        if args.dataset_type == "mini":
-            # Use the tiny subset
-            root_dir = os.path.join(data_root, "coco", "tiny_subset", "val2017")
-            ann_file = os.path.join(data_root, "coco", "tiny_subset", "annotations", "instances_val2017.json")
-            print("Using mini COCO dataset (5 classes, ~300 images)")
-        elif args.dataset_type == "small":
-            # Use val2017
-            root_dir = os.path.join(data_root, "coco", "val2017")
-            ann_file = os.path.join(data_root, "coco", "annotations", "instances_val2017.json")
-            print("Using COCO val2017 dataset (~5K images)")
-        elif args.dataset_type == "full":
-            # Use train2017
-            root_dir = os.path.join(data_root, "coco", "train2017")
-            ann_file = os.path.join(data_root, "coco", "annotations", "instances_train2017.json")
-            print("Using COCO train2017 dataset (~120K images)")
-        
-        # Check if dataset exists
-        if not os.path.exists(root_dir):
-            raise FileNotFoundError(f"Dataset directory {root_dir} not found. Please check your paths or use --download to download the dataset.")
-        
-        if not os.path.exists(ann_file):
-            raise FileNotFoundError(f"Annotation file {ann_file} not found. Please check your paths or use --download to download the dataset.")
-        
-        # Create dataloaders
-        train_dataloader = get_coco_dataloader(
-            root_dir=root_dir,
-            ann_file=ann_file,
-            batch_size=args.batch_size,
-            train=True,
-            subset=(args.dataset_type == "mini")  # Use subset only for mini dataset
-        )
-        
-        # Create a validation dataloader with a different batch size
-        val_dataloader = get_coco_dataloader(
-            root_dir=root_dir,
-            ann_file=ann_file,
-            batch_size=args.batch_size // 2 or 1,  # Smaller batch size for validation
-            train=False,
-            subset=(args.dataset_type == "mini")  # Use subset only for mini dataset
-        )
-        
-        # Get number of classes
-        num_classes = len(train_dataloader.dataset.categories) + 1  # +1 for background
+    # Download Pascal VOC dataset if needed
+    if args.download:
+        download_voc_dataset(data_root, args.voc_year)
+    
+    # Create dataloaders for Pascal VOC
+    train_dataloader = get_voc_dataloader(
+        root_dir=data_root,
+        year=args.voc_year,
+        image_set=args.voc_train_set,
+        batch_size=args.batch_size,
+        download=args.download
+    )
+    
+    val_dataloader = get_voc_dataloader(
+        root_dir=data_root,
+        year=args.voc_year,
+        image_set=args.voc_val_set,
+        batch_size=args.batch_size // 2 or 1,  # Smaller batch size for validation
+        download=False  # Already downloaded if needed
+    )
+    
+    # Get number of classes
+    num_classes = len(train_dataloader.dataset.categories) + 1  # +1 for background
+    print(f"Using Pascal VOC {args.voc_year} dataset with {num_classes-1} classes")
     
     # Create model
     model = get_faster_rcnn_model(
@@ -514,12 +397,6 @@ if __name__ == "__main__":
     # Dataset parameters
     parser.add_argument("--data-dir", type=str, default=None,
                        help="Data directory")
-    parser.add_argument("--dataset", type=str, default="coco",
-                      choices=["coco", "voc"],
-                      help="Dataset to use (coco or pascal voc)")
-    parser.add_argument("--dataset-type", type=str, default="small",
-                      choices=["mini", "small", "full"],
-                      help="Type of COCO dataset (mini: ~300 images, small: ~5K images, full: ~120K images)")
     parser.add_argument("--download", action="store_true",
                       help="Download dataset if not found")
     

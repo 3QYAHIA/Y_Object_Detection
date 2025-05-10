@@ -33,33 +33,17 @@ def main(args):
     os.makedirs("outputs", exist_ok=True)
     
     # Determine dataset related arguments
-    dataset_args = []
-    if args.dataset == "voc":
-        print(f"\nUsing Pascal VOC {args.voc_year} dataset")
-        dataset_args = [
-            "--dataset", "voc",
-            "--voc-year", args.voc_year,
-            "--voc-train-set", args.voc_train_set,
-            "--voc-val-set", args.voc_val_set
-        ]
-        if args.download:
-            dataset_args.append("--download")
-    else:  # COCO dataset
-        dataset_type = "mini" if args.tiny else args.dataset_type
-        print(f"\nUsing COCO dataset (type: {dataset_type})")
-        dataset_args = [
-            "--dataset", "coco",
-            "--dataset-type", dataset_type
-        ]
-        if args.download:
-            dataset_args.append("--download")
+    dataset_args = [
+        "--voc-year", args.voc_year,
+        "--voc-train-set", args.voc_train_set,
+        "--voc-val-set", args.voc_val_set
+    ]
+    if args.download:
+        dataset_args.append("--download")
             
     # Step 1: Download dataset if requested
     if args.download:
-        if args.dataset == "voc":
-            print(f"\n=== Step 1: Setting up Pascal VOC {args.voc_year} dataset ===")
-        else:
-            print(f"\n=== Step 1: Setting up COCO dataset ({dataset_type}) ===")
+        print(f"\n=== Step 1: Setting up Pascal VOC {args.voc_year} dataset ===")
     
     # Step 2: Train models
     if args.train:
@@ -139,17 +123,6 @@ if __name__ == "__main__":
     parser.add_argument("--evaluate", action="store_true", help="Evaluate models")
     parser.add_argument("--compare", action="store_true", help="Compare models")
     parser.add_argument("--inference", action="store_true", help="Run inference")
-    
-    # Dataset selection
-    parser.add_argument("--dataset", type=str, default="coco", choices=["coco", "voc"],
-                       help="Dataset to use (coco or pascal voc)")
-    
-    # COCO dataset parameters
-    parser.add_argument("--dataset-type", type=str, default="small", 
-                      choices=["mini", "small", "full"],
-                      help="Type of COCO dataset (mini: ~300 images, small: ~5K images, full: ~120K images)")
-    parser.add_argument("--tiny", action="store_true", default=False, 
-                       help="Use tiny subset of COCO dataset (equivalent to --dataset-type mini)")
     
     # Pascal VOC parameters
     parser.add_argument("--voc-year", type=str, default="2012",

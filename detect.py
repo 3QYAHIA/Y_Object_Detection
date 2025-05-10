@@ -17,10 +17,9 @@ import glob
 # Import project modules
 from models.detector import get_faster_rcnn_model
 from utils.visualization import draw_boxes_on_image
-from data.coco_dataset import get_coco_dataloader
 from data.voc_dataset import get_voc_dataloader, VOC_CLASSES
 
-def load_model(backbone, checkpoint_path, device):
+def load_model(backbone, checkpoint_path, device, num_classes):
     """
     Load model from checkpoint
     
@@ -28,13 +27,14 @@ def load_model(backbone, checkpoint_path, device):
         backbone: Backbone name (resnet50 or mobilenet_v2)
         checkpoint_path: Path to checkpoint
         device: Device to load model on
+        num_classes: Number of classes in the model
         
     Returns:
         model: Loaded model
     """
-    # Create model - COCO tiny dataset has 5 classes + background
+    # Create model
     model = get_faster_rcnn_model(
-        num_classes=6,
+        num_classes=num_classes,
         backbone=backbone,
         pretrained=False,
         trainable_backbone_layers=0
@@ -111,54 +111,12 @@ def run_inference(model, image, device):
 
 def get_class_names():
     """
-    Get COCO class names
+    Get Pascal VOC class names
     
     Returns:
         class_names: Dictionary mapping class indices to names
     """
-    class_names = {
-        1: 'person', 2: 'bicycle', 3: 'car', 4: 'motorcycle', 5: 'airplane',
-        6: 'bus', 7: 'train', 8: 'truck', 9: 'boat', 10: 'traffic light',
-        11: 'fire hydrant', 13: 'stop sign', 14: 'parking meter', 15: 'bench',
-        16: 'bird', 17: 'cat', 18: 'dog', 19: 'horse', 20: 'sheep', 21: 'cow',
-        22: 'elephant', 23: 'bear', 24: 'zebra', 25: 'giraffe', 27: 'backpack',
-        28: 'umbrella', 31: 'handbag', 32: 'tie', 33: 'suitcase', 34: 'frisbee',
-        35: 'skis', 36: 'snowboard', 37: 'sports ball', 38: 'kite', 39: 'baseball bat',
-        40: 'baseball glove', 41: 'skateboard', 42: 'surfboard', 43: 'tennis racket',
-        44: 'bottle', 46: 'wine glass', 47: 'cup', 48: 'fork', 49: 'knife', 50: 'spoon',
-        51: 'bowl', 52: 'banana', 53: 'apple', 54: 'sandwich', 55: 'orange',
-        56: 'broccoli', 57: 'carrot', 58: 'hot dog', 59: 'pizza', 60: 'donut',
-        61: 'cake', 62: 'chair', 63: 'couch', 64: 'potted plant', 65: 'bed', 67: 'dining table',
-        70: 'toilet', 72: 'tv', 73: 'laptop', 74: 'mouse', 75: 'remote', 76: 'keyboard',
-        77: 'cell phone', 78: 'microwave', 79: 'oven', 80: 'toaster', 81: 'sink',
-        82: 'refrigerator', 84: 'book', 85: 'clock', 86: 'vase', 87: 'scissors',
-        88: 'teddy bear', 89: 'hair drier', 90: 'toothbrush'
-    }
-    return class_names
-
-def load_classes(dataset):
-    """
-    Load class names from dataset
-    
-    Args:
-        dataset: Dataset type (coco or voc)
-        
-    Returns:
-        class_names: Dictionary of class names
-    """
-    if dataset == "voc":
-        # Pascal VOC has 20 classes
-        return {i+1: name for i, name in enumerate(VOC_CLASSES)}
-    else:
-        # For COCO, we'll create a dummy dataloader to get classes
-        dummy_dataloader = get_coco_dataloader(
-            root_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "coco", "tiny_subset", "val2017"),
-            ann_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "coco", "tiny_subset", "annotations", "instances_val2017.json"),
-            batch_size=1,
-            train=False,
-            subset=True
-        )
-        return dummy_dataloader.dataset.categories
+    return {i+1: name for i, name in enumerate(VOC_CLASSES)}
 
 def prepare_image(image_path, device):
     """
@@ -306,7 +264,7 @@ def draw_boxes(image, boxes, labels, scores, class_names, output_path):
     
     # Generate random colors for each class
     np.random.seed(42)  # For consistent colors
-    colors = {i: tuple(map(int, np.random.randint(0, 255, 3))) for i in range(1, 100)}
+    colors = {i: tuple(map(int, np.random.randint(0, 255, 3))) for i in range(1, 22)}
     
     # Draw boxes
     for box, label, score in zip(boxes, labels, scores):
@@ -437,6 +395,12 @@ def process_inputs(inputs, output_dir, model, class_names, conf_threshold, nms_t
     return results
 
 def main(args):
+    """
+    Main function for object detection
+    
+    Args:
+        args: Command line arguments
+    """
     # Set random seed for reproducibility
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -445,23 +409,19 @@ def main(args):
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Load model
-    model = load_model(args.backbone, args.checkpoint, device)
+    # Get class names
+    class_names = get_class_names()
+    print(f"Loaded {len(class_names)} classes")
+    
+    # Create model with 21 classes (Pascal VOC has 20 classes + background)
+    num_classes = len(class_names) + 1
+    model = load_model(args.backbone, args.model, device, num_classes)
     
     # Create output directory
-    output_dir = args.output
+    output_dir = args.output_dir
     if not output_dir:
         output_dir = os.path.join("outputs", args.backbone, "detections")
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Define transform
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    
-    # Get class names
-    class_names = load_classes(args.dataset)
     
     # Process input
     image_paths = []
@@ -489,6 +449,10 @@ def main(args):
         print(f"Processing image {i+1}/{len(image_paths)}: {image_path}")
         
         # Load and preprocess image
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
         img, orig_img = process_image(image_path, transform)
         
         # Run inference
@@ -539,29 +503,26 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", type=str, default="resnet50", 
                         choices=["resnet50", "mobilenet_v2"],
                         help="Backbone architecture for the model")
-    parser.add_argument("--checkpoint", type=str, default="best_model.pth",
+    parser.add_argument("--model", type=str, default="best_model.pth",
                        help="Path to model checkpoint")
     
     # Input/output parameters
     parser.add_argument("--input", type=str, required=True,
                        help="Path to input image or directory of images")
-    parser.add_argument("--output", type=str, default=None,
+    parser.add_argument("--output-dir", type=str, default=None,
                        help="Path to output directory")
     
     # Detection parameters
     parser.add_argument("--conf-threshold", type=float, default=0.5,
                        help="Confidence threshold for detections")
+    parser.add_argument("--nms-threshold", type=float, default=0.5,
+                       help="IoU threshold for NMS")
     
     # Misc parameters
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device to use for inference (cuda or cpu)")
-    
-    # Dataset parameters
-    parser.add_argument("--dataset", type=str, default="coco",
-                      choices=["coco", "voc"],
-                      help="Dataset type (for class names)")
     
     args = parser.parse_args()
     

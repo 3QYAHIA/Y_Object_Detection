@@ -13,118 +13,12 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 import time
-import subprocess
 from pathlib import Path
 
 # Import project modules
-from data.coco_dataset import get_coco_dataloader
 from data.voc_dataset import get_voc_dataloader, VOC_CLASSES
 from models.detector import get_faster_rcnn_model, get_model_info
 from evaluate import calculate_metrics
-
-def evaluate_speed(model, device, input_size=(800, 800), num_iterations=50):
-    """
-    Evaluate model inference speed
-    
-    Args:
-        model: Model to evaluate
-        device: Device to run on
-        input_size: Input image size (height, width)
-        num_iterations: Number of iterations to run
-        
-    Returns:
-        fps: Frames per second
-        latency: Latency in milliseconds
-    """
-    # Set model to evaluation mode
-    model.eval()
-    
-    # Create dummy input tensor (Faster R-CNN expects a list of tensors)
-    dummy_input = [torch.randn(3, input_size[0], input_size[1]).to(device)]
-    
-    # Warm-up
-    with torch.no_grad():
-        for _ in range(10):
-            _ = model(dummy_input)
-    
-    # Synchronize before timing
-    if device.type == 'cuda':
-        torch.cuda.synchronize()
-    
-    # Measure time
-    start_time = time.time()
-    
-    with torch.no_grad():
-        for _ in range(num_iterations):
-            _ = model(dummy_input)
-    
-    # Synchronize after timing
-    if device.type == 'cuda':
-        torch.cuda.synchronize()
-    
-    end_time = time.time()
-    
-    # Calculate metrics
-    elapsed_time = end_time - start_time
-    fps = num_iterations / elapsed_time
-    latency = (elapsed_time / num_iterations) * 1000  # convert to ms
-    
-    return fps, latency
-
-def load_model_metrics(backbone):
-    """
-    Load evaluation metrics for a model
-    
-    Args:
-        backbone: Backbone name
-        
-    Returns:
-        metrics: Dictionary of metrics
-    """
-    # Build path to metrics files
-    output_dir = os.path.join("outputs", backbone, "evaluation")
-    
-    # Initialize metrics
-    metrics = {
-        "backbone": backbone,
-        "mAP": 0,
-        "mAP_0.5": 0,
-        "mAP_0.75": 0,
-        "precision": 0,
-        "recall": 0,
-        "f1_score": 0
-    }
-    
-    # Load mAP results
-    map_file = os.path.join(output_dir, "map_results.json")
-    if os.path.exists(map_file):
-        try:
-            with open(map_file, "r") as f:
-                map_results = json.load(f)
-                metrics["mAP"] = map_results.get("mAP", 0)
-                metrics["mAP_0.5"] = map_results.get("mAP_0.5", 0)
-                metrics["mAP_0.75"] = map_results.get("mAP_0.75", 0)
-        except Exception as e:
-            print(f"Error loading mAP results for {backbone}: {e}")
-    
-    # Load precision, recall, F1 results
-    pr_file = os.path.join(output_dir, "precision_recall_f1.csv")
-    if os.path.exists(pr_file):
-        try:
-            df = pd.read_csv(pr_file)
-            if not df.empty:
-                # Calculate weighted average by support
-                weighted_precision = (df["precision"] * df["support"]).sum() / df["support"].sum()
-                weighted_recall = (df["recall"] * df["support"]).sum() / df["support"].sum()
-                weighted_f1 = (df["f1_score"] * df["support"]).sum() / df["support"].sum()
-                
-                metrics["precision"] = weighted_precision
-                metrics["recall"] = weighted_recall
-                metrics["f1_score"] = weighted_f1
-        except Exception as e:
-            print(f"Error loading precision-recall results for {backbone}: {e}")
-    
-    return metrics
 
 def benchmark_inference(model, data_loader, device, num_runs=50):
     """
@@ -201,59 +95,18 @@ def compare_backbones(backbones, args):
     print("Setting up dataset...")
     data_root = args.data_dir if args.data_dir else os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     
-    # Set up dataloaders based on dataset type
-    if args.dataset == "voc":
-        # Create dataloader for Pascal VOC
-        dataloader = get_voc_dataloader(
-            root_dir=data_root,
-            year=args.voc_year,
-            image_set=args.voc_val_set,
-            batch_size=args.batch_size,
-            download=False
-        )
-        
-        # Get number of classes
-        num_classes = len(dataloader.dataset.categories) + 1  # +1 for background
-        print(f"Using Pascal VOC {args.voc_year} dataset with {num_classes-1} classes")
-        dataset_type = "voc"
+    # Create dataloader for Pascal VOC
+    dataloader = get_voc_dataloader(
+        root_dir=data_root,
+        year=args.voc_year,
+        image_set=args.voc_val_set,
+        batch_size=args.batch_size,
+        download=False
+    )
     
-    else:  # Default to COCO dataset
-        # Set up data paths based on dataset type
-        if args.dataset_type == "mini":
-            # Use the tiny subset
-            root_dir = os.path.join(data_root, "coco", "tiny_subset", "val2017")
-            ann_file = os.path.join(data_root, "coco", "tiny_subset", "annotations", "instances_val2017.json")
-            print("Using mini COCO dataset (5 classes, ~300 images)")
-        elif args.dataset_type == "small":
-            # Use val2017
-            root_dir = os.path.join(data_root, "coco", "val2017")
-            ann_file = os.path.join(data_root, "coco", "annotations", "instances_val2017.json")
-            print("Using COCO val2017 dataset (~5K images)")
-        elif args.dataset_type == "full":
-            # Use train2017
-            root_dir = os.path.join(data_root, "coco", "train2017")
-            ann_file = os.path.join(data_root, "coco", "annotations", "instances_train2017.json")
-            print("Using COCO train2017 dataset (~120K images)")
-        
-        # Check if dataset exists
-        if not os.path.exists(root_dir):
-            raise FileNotFoundError(f"Dataset directory {root_dir} not found. Please check your paths.")
-        
-        if not os.path.exists(ann_file):
-            raise FileNotFoundError(f"Annotation file {ann_file} not found. Please check your paths.")
-        
-        # Create dataloader
-        dataloader = get_coco_dataloader(
-            root_dir=root_dir,
-            ann_file=ann_file,
-            batch_size=args.batch_size,
-            train=False,
-            subset=(args.dataset_type == "mini")  # Use subset only for mini dataset
-        )
-        
-        # Get number of classes
-        num_classes = len(dataloader.dataset.categories) + 1  # +1 for background
-        dataset_type = "coco"
+    # Get number of classes
+    num_classes = len(dataloader.dataset.categories) + 1  # +1 for background
+    print(f"Using Pascal VOC {args.voc_year} dataset with {num_classes-1} classes")
     
     # Initialize results
     results = {
@@ -311,7 +164,7 @@ def compare_backbones(backbones, args):
         backbone_output_dir = os.path.join(output_dir, backbone)
         os.makedirs(backbone_output_dir, exist_ok=True)
         
-        metrics = calculate_metrics(model, dataloader, device, num_classes, dataset_type, backbone_output_dir)
+        metrics = calculate_metrics(model, dataloader, device, num_classes, backbone_output_dir)
         
         # Add to results
         results['backbone'].append(backbone)
@@ -424,12 +277,6 @@ if __name__ == "__main__":
     # Dataset parameters
     parser.add_argument("--data-dir", type=str, default=None,
                        help="Data directory")
-    parser.add_argument("--dataset", type=str, default="coco",
-                      choices=["coco", "voc"],
-                      help="Dataset to use (coco or pascal voc)")
-    parser.add_argument("--dataset-type", type=str, default="small",
-                      choices=["mini", "small", "full"],
-                      help="Type of COCO dataset (mini: ~300 images, small: ~5K images, full: ~120K images)")
     
     # Pascal VOC specific parameters
     parser.add_argument("--voc-year", type=str, default="2012",

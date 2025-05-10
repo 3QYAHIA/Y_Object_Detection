@@ -14,7 +14,6 @@ import pandas as pd
 import seaborn as sns
 from tqdm import tqdm
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
-from collections import defaultdict
 import torch.nn.functional as F
 import matplotlib.patches as patches
 from PIL import Image
@@ -22,7 +21,6 @@ import torchvision.transforms as transforms
 from pathlib import Path
 
 # Import project modules
-from data.coco_dataset import get_coco_dataloader
 from data.voc_dataset import get_voc_dataloader
 from models.detector import get_faster_rcnn_model
 from utils.visualization import save_detection_visualization
@@ -34,7 +32,7 @@ def calculate_iou(box1, box2):
     Args:
         box1: First box [x1, y1, x2, y2]
         box2: Second box [x1, y1, x2, y2]
-        
+    
     Returns:
         iou: IoU value
     """
@@ -68,7 +66,7 @@ def calculate_map(precision_list, recall_list, classes, iou_thresholds=[0.5, 0.7
         recall_list: List of recall values per class at different IoU thresholds
         classes: Class names
         iou_thresholds: IoU thresholds to calculate mAP at
-        
+    
     Returns:
         map_values: Dictionary with mAP values at different IoU thresholds
     """
@@ -110,7 +108,7 @@ def calculate_map(precision_list, recall_list, classes, iou_thresholds=[0.5, 0.7
     
     return mAP
 
-def calculate_metrics(model, data_loader, device, num_classes, dataset_type="coco", output_dir=None):
+def calculate_metrics(model, data_loader, device, num_classes, output_dir=None):
     """
     Calculate evaluation metrics for object detection model
     
@@ -119,9 +117,8 @@ def calculate_metrics(model, data_loader, device, num_classes, dataset_type="coc
         data_loader: DataLoader for evaluation data
         device: Device to evaluate on
         num_classes: Number of classes
-        dataset_type: Type of dataset (coco or voc)
         output_dir: Directory to save outputs
-        
+    
     Returns:
         metrics: Dictionary with evaluation metrics
     """
@@ -448,59 +445,18 @@ def main(args):
     # Get data root
     data_root = args.data_dir if args.data_dir else os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     
-    # Set up dataloaders based on dataset type
-    if args.dataset == "voc":
-        # Create dataloaders for Pascal VOC
-        dataloader = get_voc_dataloader(
-            root_dir=data_root,
-            year=args.voc_year,
-            image_set=args.voc_val_set,
-            batch_size=args.batch_size,
-            download=False
-        )
-        
-        # Get number of classes
-        num_classes = len(dataloader.dataset.categories) + 1  # +1 for background
-        print(f"Using Pascal VOC {args.voc_year} dataset with {num_classes-1} classes")
-        dataset_type = "voc"
+    # Create dataloaders for Pascal VOC
+    dataloader = get_voc_dataloader(
+        root_dir=data_root,
+        year=args.voc_year,
+        image_set=args.voc_val_set,
+        batch_size=args.batch_size,
+        download=False
+    )
     
-    else:  # Default to COCO dataset
-        # Set up data paths based on dataset type
-        if args.dataset_type == "mini":
-            # Use the tiny subset
-            root_dir = os.path.join(data_root, "coco", "tiny_subset", "val2017")
-            ann_file = os.path.join(data_root, "coco", "tiny_subset", "annotations", "instances_val2017.json")
-            print("Using mini COCO dataset (5 classes, ~300 images)")
-        elif args.dataset_type == "small":
-            # Use val2017
-            root_dir = os.path.join(data_root, "coco", "val2017")
-            ann_file = os.path.join(data_root, "coco", "annotations", "instances_val2017.json")
-            print("Using COCO val2017 dataset (~5K images)")
-        elif args.dataset_type == "full":
-            # Use train2017
-            root_dir = os.path.join(data_root, "coco", "train2017")
-            ann_file = os.path.join(data_root, "coco", "annotations", "instances_train2017.json")
-            print("Using COCO train2017 dataset (~120K images)")
-        
-        # Check if dataset exists
-        if not os.path.exists(root_dir):
-            raise FileNotFoundError(f"Dataset directory {root_dir} not found. Please check your paths.")
-        
-        if not os.path.exists(ann_file):
-            raise FileNotFoundError(f"Annotation file {ann_file} not found. Please check your paths.")
-        
-        # Create dataloader
-        dataloader = get_coco_dataloader(
-            root_dir=root_dir,
-            ann_file=ann_file,
-            batch_size=args.batch_size,
-            train=False,
-            subset=(args.dataset_type == "mini")  # Use subset only for mini dataset
-        )
-        
-        # Get number of classes
-        num_classes = len(dataloader.dataset.categories) + 1  # +1 for background
-        dataset_type = "coco"
+    # Get number of classes
+    num_classes = len(dataloader.dataset.categories) + 1  # +1 for background
+    print(f"Using Pascal VOC {args.voc_year} dataset with {num_classes-1} classes")
     
     # Load model
     model = get_faster_rcnn_model(
@@ -522,7 +478,7 @@ def main(args):
     
     # Evaluate model
     start_time = time.time()
-    metrics = calculate_metrics(model, dataloader, device, num_classes, dataset_type, output_dir)
+    metrics = calculate_metrics(model, dataloader, device, num_classes, output_dir)
     elapsed_time = time.time() - start_time
     
     print(f"\nEvaluation completed in {elapsed_time:.2f} seconds")
@@ -560,12 +516,6 @@ if __name__ == "__main__":
     # Dataset parameters
     parser.add_argument("--data-dir", type=str, default=None,
                        help="Data directory")
-    parser.add_argument("--dataset", type=str, default="coco",
-                      choices=["coco", "voc"],
-                      help="Dataset to use (coco or pascal voc)")
-    parser.add_argument("--dataset-type", type=str, default="small",
-                      choices=["mini", "small", "full"],
-                      help="Type of COCO dataset (mini: ~300 images, small: ~5K images, full: ~120K images)")
     
     # Pascal VOC specific parameters
     parser.add_argument("--voc-year", type=str, default="2012",
