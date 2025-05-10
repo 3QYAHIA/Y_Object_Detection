@@ -29,9 +29,12 @@ dl_env/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# COCO dataset - avoid committing large data files
-data/coco/*
-!data/coco/README.md
+# Dataset files - avoid committing large data files
+data/VOCdevkit/
+data/voc/
+data/*.tar
+data/*.zip
+data/*.gz
 
 # Model outputs and checkpoints
 outputs/
@@ -42,4 +45,7 @@ outputs/
 
 # OS specific
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Large binary files
+*.pth 

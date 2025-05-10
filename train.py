@@ -14,6 +14,7 @@ from tqdm import tqdm
 import json
 import requests
 from pathlib import Path
+from torchvision.ops import box_iou  # Add explicit import for box_iou
 
 # Import project modules
 from data.voc_dataset import get_voc_dataloader, download_voc_dataset
@@ -191,32 +192,6 @@ def evaluate(model, data_loader, device):
     accuracy = total_correct / max(1, total_objects)
     print(f"Validation accuracy: {accuracy:.4f} ({total_correct}/{total_objects})")
     return accuracy
-
-def box_iou(boxes1, boxes2):
-    """
-    Compute IoU between two sets of boxes
-    
-    Args:
-        boxes1: (N, 4) tensor of boxes [x1, y1, x2, y2]
-        boxes2: (M, 4) tensor of boxes [x1, y1, x2, y2]
-    
-    Returns:
-        iou: (N, M) tensor of IoU values
-    """
-    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-    
-    # Compute overlap areas
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
-    
-    wh = (rb - lt).clamp(min=0)  # [N,M,2]
-    intersection = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
-    
-    union = area1[:, None] + area2 - intersection
-    
-    iou = intersection / union
-    return iou
 
 def main(args):
     """

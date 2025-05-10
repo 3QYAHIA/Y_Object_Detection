@@ -8,7 +8,7 @@ A simple implementation of object detection using Faster R-CNN with different CN
 - Support for multiple CNN backbones:
   - ResNet-50: Higher accuracy, more parameters
   - MobileNetV2: Faster inference, fewer parameters
-- Support for Pascal VOC dataset: 20 classes, standard benchmark
+- Uses Pascal VOC dataset: 20 classes, standard benchmark
 - Automatic dataset download and preprocessing
 - Comprehensive evaluation metrics:
   - mAP at IoU 0.5 and 0.75
@@ -25,6 +25,11 @@ cd object-detection
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Download Pascal VOC dataset
+python train.py --download --epochs 0  # Just download without training
+# or
+python -c "from data.voc_dataset import download_voc_dataset; download_voc_dataset('./data', '2012')"
 ```
 
 ## Training
@@ -100,6 +105,40 @@ The VOC categories are:
 - bus, car, cat, chair, cow
 - diningtable, dog, horse, motorbike, person
 - pottedplant, sheep, sofa, train, tvmonitor
+
+## GitHub Repository Setup
+
+When pushing this project to GitHub, note the following:
+
+1. Large dataset files are excluded from Git using `.gitignore`:
+   - The Pascal VOC dataset (~2GB) will need to be downloaded after cloning
+   - Model checkpoints and output files are also excluded
+
+2. To set up after cloning:
+   ```bash
+   # Clone repository
+   git clone https://github.com/your-username/object-detection.git
+   cd object-detection
+   
+   # Install dependencies
+   pip install -r requirements.txt
+   
+   # Download dataset
+   python train.py --download --epochs 0
+   ```
+
+3. The directory structure after setup should be:
+   ```
+   object-detection/
+   ├── data/
+   │   ├── VOCdevkit/  (downloaded)
+   │   ├── voc_dataset.py
+   │   └── README.md
+   ├── models/
+   ├── utils/
+   ├── outputs/  (created during training)
+   └── ...
+   ```
 
 ## How It Works
 
