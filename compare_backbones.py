@@ -14,10 +14,13 @@ import seaborn as sns
 from tqdm import tqdm
 import time
 import subprocess
+from pathlib import Path
 
 # Import project modules
 from data.coco_dataset import get_coco_dataloader
+from data.voc_dataset import get_voc_dataloader, VOC_CLASSES
 from models.detector import get_faster_rcnn_model, get_model_info
+from evaluate import calculate_metrics
 
 def evaluate_speed(model, device, input_size=(800, 800), num_iterations=50):
     """
@@ -123,9 +126,263 @@ def load_model_metrics(backbone):
     
     return metrics
 
-def compare_models(args):
+def benchmark_inference(model, data_loader, device, num_runs=50):
     """
-    Compare models with different backbones
+    Benchmark inference time
+    
+    Args:
+        model: Detection model
+        data_loader: DataLoader for test data
+        device: Device to run on
+        num_runs: Number of runs to average
+        
+    Returns:
+        avg_time: Average inference time per image
+    """
+    model.eval()
+    
+    # Get first batch
+    try:
+        images, _ = next(iter(data_loader))
+    except StopIteration:
+        # If dataloader is empty, return 0
+        return 0
+    
+    # Make sure we're using a single image for benchmarking
+    if len(images) > 1:
+        images = [images[0]]
+    
+    # Convert to device
+    images = [image.to(device) for image in images]
+    
+    # Warm up
+    for _ in range(5):
+        with torch.no_grad():
+            _ = model(images)
+    
+    # Run benchmark
+    times = []
+    
+    for _ in range(num_runs):
+        torch.cuda.synchronize() if device.type == 'cuda' else None
+        start_time = time.time()
+        
+        with torch.no_grad():
+            _ = model(images)
+        
+        torch.cuda.synchronize() if device.type == 'cuda' else None
+        end_time = time.time()
+        
+        times.append(end_time - start_time)
+    
+    avg_time = np.mean(times)
+    return avg_time
+
+def compare_backbones(backbones, args):
+    """
+    Compare different backbones
+    
+    Args:
+        backbones: List of backbones to compare
+        args: Command line arguments
+        
+    Returns:
+        results: Dictionary of results
+    """
+    # Set device
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Create output directory
+    output_dir = os.path.join("evaluation", "comparison")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Set up data
+    print("Setting up dataset...")
+    data_root = args.data_dir if args.data_dir else os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    
+    # Set up dataloaders based on dataset type
+    if args.dataset == "voc":
+        # Create dataloader for Pascal VOC
+        dataloader = get_voc_dataloader(
+            root_dir=data_root,
+            year=args.voc_year,
+            image_set=args.voc_val_set,
+            batch_size=args.batch_size,
+            download=False
+        )
+        
+        # Get number of classes
+        num_classes = len(dataloader.dataset.categories) + 1  # +1 for background
+        print(f"Using Pascal VOC {args.voc_year} dataset with {num_classes-1} classes")
+        dataset_type = "voc"
+    
+    else:  # Default to COCO dataset
+        # Set up data paths based on dataset type
+        if args.dataset_type == "mini":
+            # Use the tiny subset
+            root_dir = os.path.join(data_root, "coco", "tiny_subset", "val2017")
+            ann_file = os.path.join(data_root, "coco", "tiny_subset", "annotations", "instances_val2017.json")
+            print("Using mini COCO dataset (5 classes, ~300 images)")
+        elif args.dataset_type == "small":
+            # Use val2017
+            root_dir = os.path.join(data_root, "coco", "val2017")
+            ann_file = os.path.join(data_root, "coco", "annotations", "instances_val2017.json")
+            print("Using COCO val2017 dataset (~5K images)")
+        elif args.dataset_type == "full":
+            # Use train2017
+            root_dir = os.path.join(data_root, "coco", "train2017")
+            ann_file = os.path.join(data_root, "coco", "annotations", "instances_train2017.json")
+            print("Using COCO train2017 dataset (~120K images)")
+        
+        # Check if dataset exists
+        if not os.path.exists(root_dir):
+            raise FileNotFoundError(f"Dataset directory {root_dir} not found. Please check your paths.")
+        
+        if not os.path.exists(ann_file):
+            raise FileNotFoundError(f"Annotation file {ann_file} not found. Please check your paths.")
+        
+        # Create dataloader
+        dataloader = get_coco_dataloader(
+            root_dir=root_dir,
+            ann_file=ann_file,
+            batch_size=args.batch_size,
+            train=False,
+            subset=(args.dataset_type == "mini")  # Use subset only for mini dataset
+        )
+        
+        # Get number of classes
+        num_classes = len(dataloader.dataset.categories) + 1  # +1 for background
+        dataset_type = "coco"
+    
+    # Initialize results
+    results = {
+        'backbone': [],
+        'mAP_0.5': [],
+        'mAP_0.75': [],
+        'precision': [],
+        'recall': [],
+        'f1': [],
+        'inference_time': [],
+        'model_size': [],
+        'params_total': [],
+        'params_trainable': []
+    }
+    
+    # Compare each backbone
+    for backbone in backbones:
+        print(f"\nEvaluating {backbone} backbone...")
+        
+        # Create model
+        model = get_faster_rcnn_model(
+            num_classes=num_classes,
+            backbone=backbone,
+            pretrained=False
+        )
+        
+        # Get model info
+        model_info = get_model_info(model)
+        print(f"Model info:")
+        print(f"  Total parameters: {model_info['total_parameters']:,}")
+        print(f"  Trainable parameters: {model_info['trainable_parameters']:,}")
+        
+        # Load model weights
+        model_path = os.path.join("outputs", backbone, "best_model.pth")
+        if os.path.exists(model_path):
+            print(f"Loading model from {model_path}")
+            model.load_state_dict(torch.load(model_path, map_location=device))
+        else:
+            print(f"No saved model found at {model_path}, using untrained model")
+        
+        # Move model to device
+        model.to(device)
+        
+        # Benchmark inference time
+        print("Benchmarking inference time...")
+        inference_time = benchmark_inference(model, dataloader, device, num_runs=args.num_runs)
+        print(f"Average inference time: {inference_time * 1000:.2f} ms per image")
+        
+        # Calculate model size
+        model_size = os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0
+        print(f"Model size: {model_size:.2f} MB")
+        
+        # Calculate metrics
+        print("Calculating metrics...")
+        backbone_output_dir = os.path.join(output_dir, backbone)
+        os.makedirs(backbone_output_dir, exist_ok=True)
+        
+        metrics = calculate_metrics(model, dataloader, device, num_classes, dataset_type, backbone_output_dir)
+        
+        # Add to results
+        results['backbone'].append(backbone)
+        results['mAP_0.5'].append(metrics['mAP'].get('mAP@0.5', 0))
+        results['mAP_0.75'].append(metrics['mAP'].get('mAP@0.75', 0))
+        results['precision'].append(metrics['overall']['precision'])
+        results['recall'].append(metrics['overall']['recall'])
+        results['f1'].append(metrics['overall']['f1'])
+        results['inference_time'].append(inference_time * 1000)  # Convert to ms
+        results['model_size'].append(model_size)
+        results['params_total'].append(model_info['total_parameters'])
+        results['params_trainable'].append(model_info['trainable_parameters'])
+    
+    # Create results DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Save results
+    results_df.to_csv(os.path.join(output_dir, 'backbone_comparison.csv'), index=False)
+    
+    # Create visualization
+    create_comparison_charts(results_df, output_dir)
+    
+    return results_df
+
+def create_comparison_charts(results_df, output_dir):
+    """
+    Create charts to compare backbones
+    
+    Args:
+        results_df: DataFrame with results
+        output_dir: Directory to save charts
+    """
+    # Create figure with multiple subplots
+    fig, axs = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Accuracy metrics
+    axs[0, 0].bar(results_df['backbone'], results_df['mAP_0.5'], color='steelblue')
+    axs[0, 0].set_title('mAP@0.5')
+    axs[0, 0].set_ylim([0, 1])
+    
+    # Precision, recall, F1
+    width = 0.25
+    x = np.arange(len(results_df['backbone']))
+    
+    axs[0, 1].bar(x - width, results_df['precision'], width, label='Precision', color='lightcoral')
+    axs[0, 1].bar(x, results_df['recall'], width, label='Recall', color='lightgreen')
+    axs[0, 1].bar(x + width, results_df['f1'], width, label='F1', color='skyblue')
+    axs[0, 1].set_xticks(x)
+    axs[0, 1].set_xticklabels(results_df['backbone'])
+    axs[0, 1].set_title('Precision, Recall, F1')
+    axs[0, 1].set_ylim([0, 1])
+    axs[0, 1].legend()
+    
+    # Inference time
+    axs[1, 0].bar(results_df['backbone'], results_df['inference_time'], color='orange')
+    axs[1, 0].set_title('Inference Time (ms)')
+    
+    # Model size
+    axs[1, 1].bar(results_df['backbone'], results_df['params_total'] / 1e6, color='mediumseagreen')
+    axs[1, 1].set_title('Model Parameters (millions)')
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save figure
+    plt.savefig(os.path.join(output_dir, 'backbone_comparison.png'))
+    plt.close()
+
+def main(args):
+    """
+    Main function for comparing backbones
     
     Args:
         args: Command line arguments
@@ -134,193 +391,66 @@ def compare_models(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
-    # Create output directory
-    output_dir = os.path.join("outputs", "comparison")
-    os.makedirs(output_dir, exist_ok=True)
+    # Backbones to compare
+    backbones = ["resnet50", "mobilenet_v2"]
     
-    # Set device
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Compare backbones
+    results_df = compare_backbones(backbones, args)
     
-    # Get models information
-    backbones = ['resnet50', 'mobilenet_v2']
-    backbone_info = {}
-    model_metrics = []
+    # Print summary
+    print("\nBackbone Comparison Summary:")
+    print(results_df.to_string(index=False))
     
-    for backbone in backbones:
-        print(f"\nComparing backbone: {backbone}")
+    # Calculate relative performance
+    if len(results_df) > 1:
+        base_backbone = "resnet50"
+        compare_backbone = "mobilenet_v2"
         
-        # Create model
-        model = get_faster_rcnn_model(
-            num_classes=6,  # COCO tiny dataset has 5 classes + background
-            backbone=backbone,
-            pretrained=False,
-            trainable_backbone_layers=0
-        )
+        base_idx = results_df[results_df['backbone'] == base_backbone].index[0]
+        compare_idx = results_df[results_df['backbone'] == compare_backbone].index[0]
         
-        # Get model info
-        model_info = get_model_info(model)
-        backbone_info[backbone] = model_info
+        speed_diff = results_df.loc[base_idx, 'inference_time'] / results_df.loc[compare_idx, 'inference_time']
+        size_diff = results_df.loc[base_idx, 'params_total'] / results_df.loc[compare_idx, 'params_total']
+        acc_diff = results_df.loc[compare_idx, 'mAP_0.5'] / results_df.loc[base_idx, 'mAP_0.5']
         
-        print(f"Model info:")
-        print(f"  Total parameters: {model_info['total_parameters']:,}")
-        print(f"  Trainable parameters: {model_info['trainable_parameters']:,}")
-        
-        # Move model to device
-        model.to(device)
-        
-        # Measure inference speed
-        print("Measuring inference speed...")
-        fps, latency = evaluate_speed(model, device)
-        print(f"  FPS: {fps:.2f}")
-        print(f"  Latency: {latency:.2f} ms")
-        
-        # Check if trained model exists, otherwise we'll just compare architectures
-        model_path = os.path.join("outputs", backbone, "best_model.pth")
-        if os.path.exists(model_path):
-            print(f"Loading trained model from {model_path}")
-            model.load_state_dict(torch.load(model_path, map_location=device))
-        else:
-            print(f"No trained model found for {backbone}. Skipping accuracy comparison.")
-        
-        # Run evaluation if model exists and evaluation metrics file doesn't exist
-        eval_dir = os.path.join("outputs", backbone, "evaluation")
-        map_file = os.path.join(eval_dir, "map_results.json")
-        
-        if os.path.exists(model_path) and not os.path.exists(map_file):
-            print(f"Running evaluation for {backbone}...")
-            cmd = f"python evaluate.py --backbone {backbone} --device {args.device}"
-            subprocess.run(cmd, shell=True)
-        
-        # Load evaluation metrics
-        metrics = load_model_metrics(backbone)
-        
-        # Add speed metrics
-        metrics["fps"] = fps
-        metrics["latency"] = latency
-        metrics["parameters"] = model_info["total_parameters"]
-        
-        # Add to metrics list
-        model_metrics.append(metrics)
-    
-    # Create comparison DataFrame
-    comparison_df = pd.DataFrame(model_metrics)
-    
-    # Save comparison to CSV
-    comparison_df.to_csv(os.path.join(output_dir, "backbone_comparison.csv"), index=False)
-    
-    # Generate comparison plots
-    generate_comparison_plots(comparison_df, output_dir)
-    
-    # Print comparison table
-    print("\nBackbone Comparison:")
-    print(comparison_df.to_string(index=False))
+        print(f"\nRelative Performance ({compare_backbone} vs {base_backbone}):")
+        print(f"  Speed: {speed_diff:.2f}x faster")
+        print(f"  Size: {size_diff:.2f}x smaller")
+        print(f"  Accuracy: {acc_diff:.2f}x relative accuracy")
 
-def generate_comparison_plots(df, output_dir):
-    """
-    Generate comparison plots
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Compare object detection backbones")
     
-    Args:
-        df: DataFrame with comparison metrics
-        output_dir: Output directory
-    """
-    # Set style
-    sns.set(style="whitegrid")
+    # Dataset parameters
+    parser.add_argument("--data-dir", type=str, default=None,
+                       help="Data directory")
+    parser.add_argument("--dataset", type=str, default="coco",
+                      choices=["coco", "voc"],
+                      help="Dataset to use (coco or pascal voc)")
+    parser.add_argument("--dataset-type", type=str, default="small",
+                      choices=["mini", "small", "full"],
+                      help="Type of COCO dataset (mini: ~300 images, small: ~5K images, full: ~120K images)")
     
-    # Plot speed comparison
-    plt.figure(figsize=(12, 6))
-    ax = plt.subplot(121)
-    sns.barplot(x="backbone", y="fps", data=df, ax=ax)
-    plt.title("Inference Speed (FPS)")
-    plt.ylabel("Frames Per Second")
+    # Pascal VOC specific parameters
+    parser.add_argument("--voc-year", type=str, default="2012",
+                      choices=["2007", "2008", "2009", "2010", "2011", "2012"],
+                      help="Pascal VOC dataset year")
+    parser.add_argument("--voc-val-set", type=str, default="val",
+                      choices=["val", "test"],
+                      help="Pascal VOC validation image set")
     
-    ax = plt.subplot(122)
-    sns.barplot(x="backbone", y="latency", data=df, ax=ax)
-    plt.title("Inference Latency")
-    plt.ylabel("Latency (ms)")
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "speed_comparison.png"))
-    plt.close()
-    
-    # Plot accuracy metrics
-    plt.figure(figsize=(12, 6))
-    
-    # mAP comparison
-    ax = plt.subplot(121)
-    metrics = ["mAP_0.5", "mAP_0.75", "mAP"]
-    for i, backbone in enumerate(df["backbone"]):
-        values = [df[df["backbone"] == backbone][metric].values[0] for metric in metrics]
-        ax.bar(np.arange(len(metrics)) + 0.2*i, values, width=0.2, label=backbone)
-    
-    ax.set_xticks(np.arange(len(metrics)) + 0.1)
-    ax.set_xticklabels(["mAP@0.5", "mAP@0.75", "mAP"])
-    plt.title("mAP Comparison")
-    plt.ylabel("Score")
-    plt.ylim(0, 1)
-    plt.legend()
-    
-    # Precision, recall, F1 comparison
-    ax = plt.subplot(122)
-    metrics = ["precision", "recall", "f1_score"]
-    for i, backbone in enumerate(df["backbone"]):
-        values = [df[df["backbone"] == backbone][metric].values[0] for metric in metrics]
-        ax.bar(np.arange(len(metrics)) + 0.2*i, values, width=0.2, label=backbone)
-    
-    ax.set_xticks(np.arange(len(metrics)) + 0.1)
-    ax.set_xticklabels(["Precision", "Recall", "F1-score"])
-    plt.title("Classification Metrics")
-    plt.ylabel("Score")
-    plt.ylim(0, 1)
-    plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "accuracy_comparison.png"))
-    plt.close()
-    
-    # Size vs Performance plot
-    plt.figure(figsize=(10, 6))
-    
-    # Create bubble chart of parameters vs mAP with FPS as size
-    sizes = df["fps"] * 20  # Scale for visualization
-    
-    for i, row in df.iterrows():
-        plt.scatter(
-            row["parameters"] / 1e6,  # Parameters in millions
-            row["mAP"],
-            s=sizes[i],
-            alpha=0.7,
-            label=row["backbone"]
-        )
-        plt.text(
-            row["parameters"] / 1e6,
-            row["mAP"],
-            f"{row['backbone']}\n{row['fps']:.1f} FPS",
-            ha='center',
-            va='center'
-        )
-    
-    plt.title("Model Size vs. Accuracy vs. Speed")
-    plt.xlabel("Parameters (millions)")
-    plt.ylabel("mAP")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "size_vs_performance.png"))
-    plt.close()
-
-def main():
-    parser = argparse.ArgumentParser(description="Compare object detection models with different backbones")
-    
-    # Comparison parameters
-    parser.add_argument("--device", type=str, default="cuda",
-                       help="Device to use for evaluation (cuda or cpu)")
+    # Benchmark parameters
+    parser.add_argument("--batch-size", type=int, default=1,
+                       help="Batch size for evaluation")
+    parser.add_argument("--num-runs", type=int, default=50,
+                       help="Number of runs for benchmarking")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
     
+    # Hardware parameters
+    parser.add_argument("--device", type=str, default="cuda",
+                       help="Device to use (cuda or cpu)")
+    
     args = parser.parse_args()
     
-    # Run comparison
-    compare_models(args)
-
-if __name__ == "__main__":
-    main() 
+    main(args) 
