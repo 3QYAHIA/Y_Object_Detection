@@ -12,7 +12,7 @@ from pathlib import Path
 # VOC class names (20 classes)
 VOC_CLASSES = [
     'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 
-    'bus', 'car', 'cat', 'chair', 'cow', 
+    'bus', 'car', 'chair', 'cow', 
     'diningtable', 'dog', 'horse', 'motorbike', 'person', 
     'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor'
 ]
@@ -203,4 +203,4 @@ def get_voc_dataloader(root_dir, year="2012", image_set="train", batch_size=4, n
         collate_fn=collate_fn
     )
     
-    return dataloader 
+    return dataloader
